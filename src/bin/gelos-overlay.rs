@@ -55,7 +55,8 @@ fn main() {
     let subscription = Subscribe {
         characters:Some(vec!(String::from("all"))),
         eventNames: vec!(String::from("VehicleDestroy")),
-        worlds:vec!(String::from("25"))
+        worlds:vec!(String::from("17")),
+        logicalAndCharactersWithWorlds: true,
     };
 
     let mut j = serde_json::to_value(&subscription);
@@ -96,7 +97,7 @@ fn main() {
 	let feed_display = glium::glutin::WindowBuilder::new()
 		.with_vsync()
 		.with_dimensions(WIN_W, WIN_H)
-		.with_title("Conrod with glium!")
+		.with_title("Killfeed")
 		.with_multisampling(4)
 		.build_glium()
 		.unwrap();
@@ -104,7 +105,15 @@ fn main() {
 	let score_display = glium::glutin::WindowBuilder::new()
 		.with_vsync()
 		.with_dimensions(WIN_W, WIN_H)
-		.with_title("Conrod with glium!")
+		.with_title("Scores")
+		.with_multisampling(4)
+		.build_glium()
+		.unwrap();
+
+	let timer_display = glium::glutin::WindowBuilder::new()
+		.with_vsync()
+		.with_dimensions(WIN_W, WIN_H)
+		.with_title("Timer")
 		.with_multisampling(4)
 		.build_glium()
 		.unwrap();
@@ -112,28 +121,32 @@ fn main() {
 //TODO theme here
     let mut feed_ui = conrod::UiBuilder::new([WIN_W as f64, WIN_H as f64]).build();
     let mut score_ui = conrod::UiBuilder::new([WIN_W as f64, WIN_H as f64]).build();
+    let mut timer_ui = conrod::UiBuilder::new([WIN_W as f64, WIN_H as f64]).build();
 
 
     widget_ids!(struct ScoreIds { scores });
     let score_ids = ScoreIds::new(score_ui.widget_id_generator());
     widget_ids!(struct FeedIds { feed });
     let feed_ids = FeedIds::new(feed_ui.widget_id_generator());
+    widget_ids!(struct TimerIds { timer });
+    let timer_ids = TimerIds::new(timer_ui.widget_id_generator());
 
 
     const FONT_PATH: &'static str = "assets/fonts/LiberationMono-Regular.ttf";
     feed_ui.fonts.insert_from_file(FONT_PATH).unwrap();
     score_ui.fonts.insert_from_file(FONT_PATH).unwrap();
+    timer_ui.fonts.insert_from_file(FONT_PATH).unwrap();
 
     let mut feed_renderer = conrod::backend::glium::Renderer::new(&feed_display).unwrap();
     let mut score_renderer = conrod::backend::glium::Renderer::new(&score_display).unwrap();
+    let mut timer_renderer = conrod::backend::glium::Renderer::new(&timer_display).unwrap();
 
-    let feed_image_map = conrod::image::Map::<glium::texture::Texture2d>::new();
-    let score_image_map = conrod::image::Map::<glium::texture::Texture2d>::new();
-
+    let image_map = conrod::image::Map::<glium::texture::Texture2d>::new();
 
     let mut buf = FeedBuffer::new(10);
 
     let mut last_update = std::time::Instant::now();
+    let mut start_time = std::time::Instant::now();
 
     'main: loop {
         let sixteen_ms = std::time::Duration::from_millis(16);
@@ -143,6 +156,7 @@ fn main() {
         }
         let mut score_events: Vec<_> = score_display.poll_events().collect();
         let mut feed_events: Vec<_> = feed_display.poll_events().collect();
+        let mut timer_events: Vec<_> = timer_display.poll_events().collect();
 
         for event in ps2_rx.try_iter() {
             match event {
@@ -196,6 +210,25 @@ fn main() {
             }
         }
 
+        for event in timer_events {
+            if let Some(event) = conrod::backend::winit::convert(event.clone(), &score_display) {
+                timer_ui.handle_event(event);
+            }
+
+
+            match event {
+                // Break from the loop upon `Escape`.
+                glium::glutin::Event::KeyboardInput(_, _, Some(glium::glutin::VirtualKeyCode::Escape)) |
+                glium::glutin::Event::Closed =>
+                    break 'main,
+                glium::glutin::Event::Refresh => {
+                    force_redraw = true;
+                }
+                _ => {},
+            }
+        }
+
+
         {
             let feed_ui = &mut feed_ui.set_widgets();
 
@@ -212,37 +245,61 @@ fn main() {
                 .color(conrod::color::WHITE)
                 .font_size(12)
                 .set(score_ids.scores, score_ui);
+
+            let now = std::time::Instant::now();
+            let timer_ui = &mut timer_ui.set_widgets();
+            widget::Text::new(&pretty_time(now.duration_since(start_time).as_secs()))
+                .middle_of(timer_ui.window)
+                .color(conrod::color::WHITE)
+                .font_size(12)
+                .set(timer_ids.timer, timer_ui);
         }
+
         if force_redraw{
             let feed_primitives = feed_ui.draw();
-            feed_renderer.fill(&feed_display, feed_primitives, &feed_image_map);
+            feed_renderer.fill(&feed_display, feed_primitives, &image_map);
             let mut feed_target = feed_display.draw();
             feed_target.clear_color(0.0, 0.0, 0.0, 1.0);
-            feed_renderer.draw(&feed_display, &mut feed_target, &feed_image_map).unwrap();
+            feed_renderer.draw(&feed_display, &mut feed_target, &image_map).unwrap();
             feed_target.finish().unwrap();
 
             let score_primitives = score_ui.draw();
-            score_renderer.fill(&score_display, score_primitives, &score_image_map);
+            score_renderer.fill(&score_display, score_primitives, &image_map);
             let mut score_target = score_display.draw();
             score_target.clear_color(0.0, 0.0, 0.0, 1.0);
-            score_renderer.draw(&score_display, &mut score_target, &score_image_map).unwrap();
+            score_renderer.draw(&score_display, &mut score_target, &image_map).unwrap();
             score_target.finish().unwrap();
+            
+            let timer_primitives = timer_ui.draw();
+            timer_renderer.fill(&timer_display, timer_primitives, &image_map);
+            let mut timer_target = timer_display.draw();
+            timer_target.clear_color(0.0, 0.0, 0.0, 1.0);
+            timer_renderer.draw(&timer_display, &mut timer_target, &image_map).unwrap();
+            timer_target.finish().unwrap();
         } else {
             // Render the `Ui` and then display it on the screen.
             if let Some(feed_primitives) = feed_ui.draw_if_changed() {
-                feed_renderer.fill(&feed_display, feed_primitives, &feed_image_map);
+                feed_renderer.fill(&feed_display, feed_primitives, &image_map);
                 let mut feed_target = feed_display.draw();
                 feed_target.clear_color(0.0, 0.0, 0.0, 1.0);
-                feed_renderer.draw(&feed_display, &mut feed_target, &feed_image_map).unwrap();
+                feed_renderer.draw(&feed_display, &mut feed_target, &image_map).unwrap();
                 feed_target.finish().unwrap();
             }
 
             if let Some(score_primitives) = score_ui.draw_if_changed() {
-                score_renderer.fill(&score_display, score_primitives, &score_image_map);
+                score_renderer.fill(&score_display, score_primitives, &image_map);
                 let mut score_target = score_display.draw();
                 score_target.clear_color(0.0, 0.0, 0.0, 1.0);
-                score_renderer.draw(&score_display, &mut score_target, &score_image_map).unwrap();
+                score_renderer.draw(&score_display, &mut score_target, &image_map).unwrap();
                 score_target.finish().unwrap();
+            }
+            
+            if let Some(timer_primitives) = timer_ui.draw_if_changed() {
+                timer_renderer.fill(&timer_display, timer_primitives, &image_map);
+                let mut timer_target = timer_display.draw();
+                timer_target.clear_color(0.0, 0.0, 0.0, 1.0);
+                timer_renderer.draw(&timer_display, &mut timer_target, &image_map).unwrap();
+                timer_target.finish().unwrap();
             }
         }
     }
@@ -277,6 +334,12 @@ fn render_scores(loss_tally: &[[u32; 16]; 4]) -> String {
             loss_tally[3][i]));
     }
     return string;
+}
+
+fn pretty_time(secs: u64) -> String {
+    let secs2 = secs % 60;
+    let mins = secs / 60;
+    format!("{}:{:0>2}", mins, secs2)
 }
 
 fn handle_vehicle_destroy(vehicle_destroy: &VehicleDestroy,
@@ -367,6 +430,7 @@ fn planetside_listen (mut receiver: websocket::receiver::Receiver<
                     &*message.payload).unwrap();
                 match parse_message(jv.clone()) {
                     Some(planetside::Message::Service(m)) => {
+                        println!("VehicleDestroy received");
                         let ps2_tx2 = ps2_tx.clone();
                         let cache = cache.clone();
                         pool.execute(move|| {

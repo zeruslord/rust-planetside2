@@ -11,9 +11,11 @@ use std::io::Read;
 
 #[derive(Serialize, Deserialize)]
 pub struct Subscribe {
+#[serde(skip_serializing_if = "Option::is_none")]
     pub characters: Option<Vec<String>>,
     pub eventNames: Vec<String>,
     pub worlds: Vec<String>,
+    pub logicalAndCharactersWithWorlds: bool,
 }
 
 #[derive(Clone, Debug,Serialize,Deserialize)]
