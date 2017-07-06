@@ -39,7 +39,7 @@ enum MainEvent<'a> {
 
 enum UIEvent {
     Score(u8, u32),
-    Spam(String),
+    Feed(String),
 }
 
 const FACTIONS:[&str; 4] = ["NS", "VS", "NC", "TR"];
@@ -48,8 +48,8 @@ const VEHICLES:[&str; 16] = ["", "Flash", "Sunderer", "Lightning", "Magrider",
     "Vanguard", "Prowler", "Scythe", "Reaver", "Mosquito", "Liberator", 
     "Galaxy", "Harasser", "Drop Pod", "Valkyrie", "ANT"];
 
-const WIN_W: u32 = 1200;
-const WIN_H: u32 = 800;
+const WIN_W: u32 = 400;
+const WIN_H: u32 = 500;
 
 fn main() {
     let subscription = Subscribe {
@@ -93,7 +93,15 @@ fn main() {
     let mut loss_tally: [[u32; 16];4] = [[0;16];4];
 
 
-	let display = glium::glutin::WindowBuilder::new()
+	let feed_display = glium::glutin::WindowBuilder::new()
+		.with_vsync()
+		.with_dimensions(WIN_W, WIN_H)
+		.with_title("Conrod with glium!")
+		.with_multisampling(4)
+		.build_glium()
+		.unwrap();
+
+	let score_display = glium::glutin::WindowBuilder::new()
 		.with_vsync()
 		.with_dimensions(WIN_W, WIN_H)
 		.with_title("Conrod with glium!")
@@ -102,22 +110,28 @@ fn main() {
 		.unwrap();
 
 //TODO theme here
-    let mut ui = conrod::UiBuilder::new([WIN_W as f64, WIN_H as f64]).build();
+    let mut feed_ui = conrod::UiBuilder::new([WIN_W as f64, WIN_H as f64]).build();
+    let mut score_ui = conrod::UiBuilder::new([WIN_W as f64, WIN_H as f64]).build();
 
 
-    widget_ids!(struct Ids { spam, scores });
-    let ids = Ids::new(ui.widget_id_generator());
+    widget_ids!(struct ScoreIds { scores });
+    let score_ids = ScoreIds::new(score_ui.widget_id_generator());
+    widget_ids!(struct FeedIds { feed });
+    let feed_ids = FeedIds::new(feed_ui.widget_id_generator());
 
 
-    const FONT_PATH: &'static str = "LiberationMono-Regular.ttf";
-    ui.fonts.insert_from_file(FONT_PATH).unwrap();
+    const FONT_PATH: &'static str = "assets/fonts/LiberationMono-Regular.ttf";
+    feed_ui.fonts.insert_from_file(FONT_PATH).unwrap();
+    score_ui.fonts.insert_from_file(FONT_PATH).unwrap();
 
-    let mut renderer = conrod::backend::glium::Renderer::new(&display).unwrap();
+    let mut feed_renderer = conrod::backend::glium::Renderer::new(&feed_display).unwrap();
+    let mut score_renderer = conrod::backend::glium::Renderer::new(&score_display).unwrap();
 
-    let image_map = conrod::image::Map::<glium::texture::Texture2d>::new();
+    let feed_image_map = conrod::image::Map::<glium::texture::Texture2d>::new();
+    let score_image_map = conrod::image::Map::<glium::texture::Texture2d>::new();
 
 
-    let mut buf = SpamBuffer::new(10);
+    let mut buf = FeedBuffer::new(10);
 
     let mut last_update = std::time::Instant::now();
 
@@ -125,17 +139,18 @@ fn main() {
         let sixteen_ms = std::time::Duration::from_millis(16);
         let duration_since_last_update = std::time::Instant::now().duration_since(last_update);
         if duration_since_last_update < sixteen_ms {
-            println!("main thread sleeping");
             std::thread::sleep(sixteen_ms - duration_since_last_update);
         }
-        let mut events: Vec<_> = display.poll_events().collect();
+        let mut score_events: Vec<_> = score_display.poll_events().collect();
+        let mut feed_events: Vec<_> = feed_display.poll_events().collect();
+
         for event in ps2_rx.try_iter() {
             match event {
                 UIEvent::Score(faction_id, vehicle_id) => {
                     loss_tally[faction_id as usize][vehicle_id as usize] =
                         loss_tally[faction_id as usize][vehicle_id as usize] + 1;
                 }
-                UIEvent::Spam(string) => {
+                UIEvent::Feed(string) => {
                     buf.add_string(string);
                 }
             }
@@ -145,9 +160,27 @@ fn main() {
         last_update = std::time::Instant::now();
         
         let mut force_redraw = false;
-        for event in events {
-            if let Some(event) = conrod::backend::winit::convert(event.clone(), &display) {
-                ui.handle_event(event);
+        for event in score_events {
+            if let Some(event) = conrod::backend::winit::convert(event.clone(), &score_display) {
+                score_ui.handle_event(event);
+            }
+
+
+            match event {
+                // Break from the loop upon `Escape`.
+                glium::glutin::Event::KeyboardInput(_, _, Some(glium::glutin::VirtualKeyCode::Escape)) |
+                glium::glutin::Event::Closed =>
+                    break 'main,
+                glium::glutin::Event::Refresh => {
+                    force_redraw = true;
+                }
+                _ => {},
+            }
+        }
+
+        for event in feed_events {
+            if let Some(event) = conrod::backend::winit::convert(event.clone(), &feed_display) {
+                feed_ui.handle_event(event);
             }
 
 
@@ -164,36 +197,52 @@ fn main() {
         }
 
         {
-            let ui = &mut ui.set_widgets();
+            let feed_ui = &mut feed_ui.set_widgets();
 
             // "Hello World!" in the middle of the screen.
             widget::Text::new(&buf.render())
-                .mid_left_of(ui.window)
+                .top_left_of(feed_ui.window)
                 .color(conrod::color::WHITE)
                 .font_size(12)
-                .set(ids.spam, ui);
+                .set(feed_ids.feed, feed_ui);
             
+            let score_ui = &mut score_ui.set_widgets();
             widget::Text::new(&render_scores(&loss_tally))
-                .mid_right_of(ui.window)
+                .middle_of(score_ui.window)
                 .color(conrod::color::WHITE)
                 .font_size(12)
-                .set(ids.scores, ui);
+                .set(score_ids.scores, score_ui);
         }
         if force_redraw{
-            let primitives = ui.draw();
-            renderer.fill(&display, primitives, &image_map);
-            let mut target = display.draw();
-            target.clear_color(0.0, 0.0, 0.0, 1.0);
-            renderer.draw(&display, &mut target, &image_map).unwrap();
-            target.finish().unwrap();
+            let feed_primitives = feed_ui.draw();
+            feed_renderer.fill(&feed_display, feed_primitives, &feed_image_map);
+            let mut feed_target = feed_display.draw();
+            feed_target.clear_color(0.0, 0.0, 0.0, 1.0);
+            feed_renderer.draw(&feed_display, &mut feed_target, &feed_image_map).unwrap();
+            feed_target.finish().unwrap();
+
+            let score_primitives = score_ui.draw();
+            score_renderer.fill(&score_display, score_primitives, &score_image_map);
+            let mut score_target = score_display.draw();
+            score_target.clear_color(0.0, 0.0, 0.0, 1.0);
+            score_renderer.draw(&score_display, &mut score_target, &score_image_map).unwrap();
+            score_target.finish().unwrap();
         } else {
             // Render the `Ui` and then display it on the screen.
-            if let Some(primitives) = ui.draw_if_changed() {
-                renderer.fill(&display, primitives, &image_map);
-                let mut target = display.draw();
-                target.clear_color(0.0, 0.0, 0.0, 1.0);
-                renderer.draw(&display, &mut target, &image_map).unwrap();
-                target.finish().unwrap();
+            if let Some(feed_primitives) = feed_ui.draw_if_changed() {
+                feed_renderer.fill(&feed_display, feed_primitives, &feed_image_map);
+                let mut feed_target = feed_display.draw();
+                feed_target.clear_color(0.0, 0.0, 0.0, 1.0);
+                feed_renderer.draw(&feed_display, &mut feed_target, &feed_image_map).unwrap();
+                feed_target.finish().unwrap();
+            }
+
+            if let Some(score_primitives) = score_ui.draw_if_changed() {
+                score_renderer.fill(&score_display, score_primitives, &score_image_map);
+                let mut score_target = score_display.draw();
+                score_target.clear_color(0.0, 0.0, 0.0, 1.0);
+                score_renderer.draw(&score_display, &mut score_target, &score_image_map).unwrap();
+                score_target.finish().unwrap();
             }
         }
     }
@@ -234,7 +283,6 @@ fn handle_vehicle_destroy(vehicle_destroy: &VehicleDestroy,
         ps2_tx: mpsc::Sender<UIEvent>,
         cache: Arc<Mutex<HashMap<String, Character>>>) {
     if vehicle_destroy.vehicle_id < 16 {
-        println!("real vehicle destroy being handled");
         let (attacker, victim): (Option<Character>, Option<Character>) = {
             let map = cache.lock().unwrap();
             (map.get(&vehicle_destroy.attacker_character_id).cloned(),
@@ -274,7 +322,7 @@ fn handle_vehicle_destroy(vehicle_destroy: &VehicleDestroy,
         };
         match (&attacker, &victim) {
             (&Some(ref attacker), &Some(ref victim)) => {
-                ps2_tx.send(UIEvent::Spam(format!("{} destroyed {}'s {}",
+                ps2_tx.send(UIEvent::Feed(format!("{} destroyed {}'s {}",
                     attacker.name.first,
                     victim.name.first,
                     VEHICLES[vehicle_destroy.vehicle_id as usize])));
@@ -286,10 +334,8 @@ fn handle_vehicle_destroy(vehicle_destroy: &VehicleDestroy,
                     vehicle_destroy.vehicle_id)).unwrap();
             }
         }
-        println!("vehicle destroy sent to main thread");
     }
     else {
-        println!("fake vehicle destroy being ignored");
     }
 }
 
@@ -326,7 +372,6 @@ fn planetside_listen (mut receiver: websocket::receiver::Receiver<
                         pool.execute(move|| {
                             handle_service_message(m, ps2_tx2, cache);
                         });
-                        println!("vehicle destroy received");
                     }
                     Some(_) => {}
                     None => println!("Could not deserialize message: {}",
@@ -344,16 +389,16 @@ fn planetside_listen (mut receiver: websocket::receiver::Receiver<
     }
 }
 
-struct SpamBuffer {
+struct FeedBuffer {
     size: usize,
     count: usize,
     index: usize,
     buf: Vec<String>,
 }
 
-impl SpamBuffer {
-    fn new(size: usize) -> SpamBuffer {
-        SpamBuffer {
+impl FeedBuffer {
+    fn new(size: usize) -> FeedBuffer {
+        FeedBuffer {
             size: size,
             count: 0,
             index: 0,
