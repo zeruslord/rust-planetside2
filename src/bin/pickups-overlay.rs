@@ -35,7 +35,8 @@ fn main() {
         characters:Some(vec!(String::from("all"))),
         eventNames: vec!(String::from("GainExperience_experience_id_314"),
                          String::from("PlayerDeath")),
-        worlds:vec!(String::from("17"))
+        worlds:vec!(String::from("17")),
+        logicalAndCharactersWithWorlds: false,
     };
 
     let mut j = serde_json::to_value(&subscription);
