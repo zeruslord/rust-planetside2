@@ -4,8 +4,13 @@ extern crate serde_derive;
 extern crate serde_json;
 
 extern crate hyper;
+extern crate futures;
+extern crate tokio_core;
 
-use hyper::Url;
+use hyper::Uri;
+use futures::future::Future;
+use futures::Stream;
+use tokio_core::reactor::Handle;
 
 use std::io::Read;
 
@@ -162,31 +167,49 @@ pub struct CharacterReturn {
     returned: u32
 }
 
+#[derive(Debug)]
+pub enum Error {
+    Json(serde_json::Error),
+    Hyper(hyper::Error),
+    Server(hyper::StatusCode),
+    NoCharacter(String),
+}
 
-pub fn lookup_character(id: &str) -> Option<Character> {
-    let client = hyper::Client::new();
-    let mut url = Url::parse("https://census.daybreakgames.com/s:scrmopsbot/get/ps2:v2/character").unwrap();
-    url.query_pairs_mut().append_pair("character_id", id);
-
-    match client.get(url).send() {
+pub fn lookup_character(id: &str, evloop: &Handle) ->
+        Box<Future<Item = Character, Error = Error>> {
+    let client = hyper::Client::new(evloop);
+    let url_str = format!("http://census.daybreakgames.com/s:scrmopsbot/get/ps2:v2/character?character_id={}", id);
+    print!("{}\n", url_str);
+    let url = url_str.parse().unwrap();
+    let id = String::from(id);
+    Box::new(client.get(url).then(move |resp| match resp {
         Ok(mut resp) => {
-            if resp.status == hyper::status::StatusCode::Ok {
-                let mut json = String::new();
-                resp.read_to_string(&mut json);
-                let parse: Result<CharacterReturn, serde_json::Error> = 
-                    serde_json::from_str(&json);
-                match parse {
-                    Ok(ret) => Some(ret.character_list[0].clone()),
-                    Err(_) => {
-                        None
+            match resp.status() {
+                hyper::StatusCode::Ok => {
+                    let mut json = String::new();
+                    let chunk = resp.body().concat().wait().unwrap();
+                    let parse: Result<CharacterReturn, serde_json::Error> =
+                        serde_json::from_slice(&chunk);
+                    match parse {
+                        Ok(ret) => {
+                            if ret.character_list.len() == 1 {
+                                Ok(ret.character_list[0].clone())
+                            } else {
+                                Err(Error::NoCharacter(String::from(id)))
+                            }
+                        }
+                        Err(err) => {
+                            Err(Error::Json(err))
+                        }
                     }
                 }
-            } else {
-                None
+                status => {
+                    Err(Error::Server(status))
+                }
             }
         }
-        _ => None
-    }
+        Err(err) => Err(Error::Hyper(err))
+    }))
 }
 
 pub fn parse_message(message: serde_json::Value) -> Option<Message> {
@@ -248,5 +271,12 @@ pub fn parse_event(event: serde_json::Value) -> Option<Event> {
             Err(_) => None
         },
         None => None
+    }
+}
+
+pub fn zone_id_is_vr(zone_id: u32) -> bool {
+    match zone_id {
+        96 | 97 | 98 => true,
+        _ => false,
     }
 }

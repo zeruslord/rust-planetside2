@@ -7,15 +7,6 @@ authors = ["zeruslord <zeruslord@gmail.com>"]
 name = "planetside"
 
 [[bin]]
-name = "opsbot"
-
-[[bin]]
-name = "opsscript"
-
-[[bin]]
-name = "pickups-overlay"
-
-[[bin]]
 name = "gelos-overlay"
 
 [dependencies]
@@ -23,15 +14,13 @@ nom = "^2.1.0"
 serde = "^0.8.6"
 serde_json = "^0.8.6"
 serde_derive = "^0.8.6"
-websocket = "^0.17.1"
-hyper = "^0.9.18"
+websocket = "^0.20.2"
+hyper = "^0.11"
 threadpool = "^1.3.2"
+futures = "^0.1.14"
+tokio-core = "^0.1.8"
 
 [dependencies.conrod]
 version = "^0.53.0"
 default-features = false
 features = ["glium", "winit"]
-
-[dependencies.discord]
-version = "^0.7"
-default-features=false
