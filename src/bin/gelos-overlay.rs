@@ -23,21 +23,28 @@ use serde_json::Value;
 use websocket::client::builder::{ClientBuilder, Url};
 use websocket::async::futures::{Sink, Stream};
 use websocket::message::{Message, OwnedMessage};
+use websocket::async::futures::stream::SplitSink;
+use websocket::client::async::Client;
+use websocket::WebSocketError;
+use websocket::stream::async::{AsyncRead, AsyncWrite};
 
 use futures::future;
-use futures::future::Future;
+use futures::future::{Executor, Future};
 
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::collections::HashMap;
 use std::env;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::ops::DerefMut;
 
 use planetside::{Subscribe, GainExperience, VehicleDestroy, Event, parse_event, ServiceMessage,
     parse_message, lookup_character, Character, zone_id_is_vr};
 
 use conrod::{widget, Borderable, Colorable, Labelable, Positionable, Sizeable, Widget};
 use conrod::backend::glium::glium;
-use conrod::backend::glium::glium::{DisplayBuild, Surface};
+use conrod::backend::glium::glium::{Surface};
 
 use threadpool::ThreadPool;
 
@@ -80,6 +87,43 @@ impl Faction {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Server {
+    Connery,
+    Miller,
+    Cobalt,
+    Emerald,
+    Jaeger,
+    Briggs
+}
+
+impl Server {
+    fn to_string(&self) -> String {
+        match self {
+            &Server::Connery => String::from("Connery"),
+            &Server::Miller => String::from("Miller"),
+            &Server::Cobalt => String::from("Cobalt"),
+            &Server::Emerald => String::from("Emerald"),
+            &Server::Jaeger => String::from("Jaeger"),
+            &Server::Briggs => String::from("Briggs"),
+        }
+    }
+
+    fn get_server_num(&self) -> String {
+        match self {
+            &Server::Connery => String::from("1"),
+            &Server::Miller => String::from("10"),
+            &Server::Cobalt => String::from("13"),
+            &Server::Emerald => String::from("17"),
+            &Server::Jaeger => String::from("19"),
+            &Server::Briggs => String::from("25"),
+        }
+    }
+}
+
+const SERVERS:[Server; 6] = [Server::Connery, Server::Miller, Server::Cobalt, Server::Emerald,
+    Server::Jaeger, Server::Briggs];
+
 const FACTIONS:[&str; 4] = ["NS", "VS", "NC", "TR"];
 
 const VEHICLES:[&str; 16] = ["", "Flash", "Sunderer", "Lightning", "Magrider",
@@ -92,27 +136,30 @@ const WIN_H: u32 = 500;
 fn main() {
 
     let (ps2_tx, ps2_rx) = mpsc::channel();
+    let (mut subscribe_tx, subscribe_rx) = futures::sync::mpsc::channel(1);
 
     thread::spawn(move || {
-        planetside_listen(ps2_tx);
+        planetside_listen(ps2_tx, subscribe_rx);
     });
 
     let mut kill_tally: [[u32; 16];4] = [[0;16];4];
 
-
-	let overlay_display = glium::glutin::WindowBuilder::new()
-		.with_vsync()
+    let mut overlay_events_loop = glium::glutin::EventsLoop::new();
+	let overlay_window = glium::glutin::WindowBuilder::new()
 		.with_dimensions(WIN_W, WIN_H)
-		.with_title("Killfeed")
-		.build_glium()
-		.unwrap();
+		.with_title("Gelosdome Overlay");
+    let overlay_context = glium::glutin::ContextBuilder::new()
+        .with_vsync(true);
+    let overlay_display = glium::Display::new(overlay_window, overlay_context, &overlay_events_loop).unwrap();
 
-    let control_display = glium::glutin::WindowBuilder::new()
-        .with_vsync()
-        .with_dimensions(WIN_W, WIN_H)
-        .with_title("Control")
-        .build_glium()
-        .unwrap();
+    let mut control_events_loop = glium::glutin::EventsLoop::new();
+    let control_window = glium::glutin::WindowBuilder::new()
+		.with_dimensions(WIN_W, WIN_H)
+		.with_title("Gelosdome Overlay Controls");
+    let control_context = glium::glutin::ContextBuilder::new()
+        .with_vsync(true);
+    let control_display = glium::Display::new(control_window, control_context, &control_events_loop).unwrap();
+
 
 //TODO theme here
     let (w, h) = glium::glutin::get_primary_monitor().get_dimensions();
@@ -123,7 +170,7 @@ fn main() {
             left_faction, right_faction, top_canvas });
     let overlay_ids = OverlayIds::new(overlay_ui.widget_id_generator());
     widget_ids!(struct ControlIds { left_dropdown, right_dropdown, go_button,
-        text });
+        text, server_dropdown, subscribe_button });
     let control_ids = ControlIds::new(control_ui.widget_id_generator());
 
     const FONT_PATH: &'static str = "assets/fonts/LiberationMono-Regular.ttf";
@@ -147,6 +194,8 @@ fn main() {
     let mut left_faction = Faction::NS;
     let mut right_faction_idx = None;
     let mut right_faction = Faction::NS;
+    let mut server_idx = 4;
+    let mut server = Server::Jaeger;
 
     'main: loop {
         let sixteen_ms = std::time::Duration::from_millis(16);
@@ -161,8 +210,12 @@ fn main() {
             time_up = true;
         }
 
-        let mut overlay_events: Vec<_> = overlay_display.poll_events().collect();
-        let mut control_events: Vec<_> = control_display.poll_events().collect();
+
+        let mut overlay_events = Vec::new();
+        overlay_events_loop.poll_events(|event| overlay_events.push(event));
+
+        let mut control_events = Vec::new();
+        control_events_loop.poll_events(|event| control_events.push(event));
 
         for event in ps2_rx.try_iter() {
             if started && !time_up {
@@ -183,36 +236,54 @@ fn main() {
 
         let mut force_redraw = false;
         for event in overlay_events {
-            if let Some(event) = conrod::backend::winit::convert(event.clone(), &overlay_display) {
+            if let Some(event) = conrod::backend::winit::convert_event(event.clone(), &overlay_display) {
                 overlay_ui.handle_event(event);
             }
 
             match event {
-                // Break from the loop upon `Escape`.
-                glium::glutin::Event::KeyboardInput(_, _, Some(glium::glutin::VirtualKeyCode::Escape)) |
-                glium::glutin::Event::Closed =>
-                    break 'main,
-                glium::glutin::Event::Refresh => {
-                    force_redraw = true;
-                }
-                _ => {},
+                glium::glutin::Event::WindowEvent { event, .. } => match event {
+                    // Break from the loop upon `Escape`.
+                    glium::glutin::WindowEvent::Closed |
+                    glium::glutin::WindowEvent::KeyboardInput{
+                        input: glium::glutin::KeyboardInput {
+                            virtual_keycode: Some(glium::glutin::VirtualKeyCode::Escape),
+                            ..
+                        },
+                        ..
+                    } =>
+                        break 'main,
+                    glium::glutin::WindowEvent::Refresh => {
+                        force_redraw = true;
+                    }
+                    _ => {},
+                },
+                _ => {}
             }
         }
 
         for event in control_events {
-            if let Some(event) = conrod::backend::winit::convert(event.clone(), &control_display) {
+            if let Some(event) = conrod::backend::winit::convert_event(event.clone(), &control_display) {
                 control_ui.handle_event(event);
             }
 
             match event {
-                // Break from the loop upon `Escape`.
-                glium::glutin::Event::KeyboardInput(_, _, Some(glium::glutin::VirtualKeyCode::Escape)) |
-                glium::glutin::Event::Closed =>
-                    break 'main,
-                glium::glutin::Event::Refresh => {
-                    force_redraw = true;
-                }
-                _ => {},
+                glium::glutin::Event::WindowEvent { event, .. } => match event {
+                    // Break from the loop upon `Escape`.
+                    glium::glutin::WindowEvent::Closed |
+                    glium::glutin::WindowEvent::KeyboardInput{
+                        input: glium::glutin::KeyboardInput {
+                            virtual_keycode: Some(glium::glutin::VirtualKeyCode::Escape),
+                            ..
+                        },
+                        ..
+                    } =>
+                        break 'main,
+                    glium::glutin::WindowEvent::Refresh => {
+                        force_redraw = true;
+                    }
+                    _ => {},
+                },
+                _ => {}
             }
         }
 
@@ -333,7 +404,31 @@ fn main() {
                     &_ => Faction::NS
                 }
             }
+
+            for selected_idx in widget::DropDownList::new(&["Connery", "Miller",
+                    "Cobalt", "Emerald", "Jaeger", "Briggs"], Some(server_idx))
+                .w_h(150.0, 40.0)
+                .label("Server")
+                .down_from(control_ids.text, 80.0)
+                .set(control_ids.server_dropdown, control_ui)
+            {
+                server_idx = selected_idx;
+                server = SERVERS[selected_idx];
+            }
+
+            if widget::Button::new()
+                .w_h(300.0, 50.0)
+                .mid_bottom_of(control_ui.window)
+                .color(conrod::color::GREY)
+                .border(2.0)
+                .label("SUBSCRIBE")
+                .set(control_ids.subscribe_button, control_ui)
+                .was_clicked()
+            {
+                subscribe_tx = subscribe_tx.send(server).wait().unwrap();
+            }
         }
+
 
         if force_redraw{
             let overlay_primitives = overlay_ui.draw();
@@ -498,81 +593,107 @@ fn handle_service_message (sm: ServiceMessage,
 }
 enum Error {
     Planetside(planetside::Error),
-    WebSocket(websocket::WebSocketError),
+    WebSocket(WebSocketError),
 }
 
-impl From<websocket::WebSocketError> for Error {
-    fn from (err: websocket::WebSocketError) -> Error {
+impl From<WebSocketError> for Error {
+    fn from (err: WebSocketError) -> Error {
         Error::WebSocket(err)
     }
 }
 
-// TODO: move the event loop here and replace the thread pool
-fn planetside_listen (ps2_tx: mpsc::Sender<UIEvent>) {
+fn subscribe(sink: &mut SplitSink<Client<Box<websocket::async::Stream + Send>>>, server: Server) {
+    let subscription = Subscribe {
+        characters:Some(vec!(String::from("all"))),
+        eventNames: vec!(String::from("VehicleDestroy")),
+        worlds:vec!(String::from(server.get_server_num())),
+        logicalAndCharactersWithWorlds: true,
+    };
+
+    let mut j = serde_json::to_value(&subscription);
+    j.as_object_mut().unwrap().insert(String::from("action"),
+        Value::String(String::from("subscribe")));
+    j.as_object_mut().unwrap().insert(String::from("service"),
+        Value::String(String::from("event")));
+
+    let message = websocket::Message::text(j.to_string());
+
+    sink.start_send(OwnedMessage::from(message));
+    sink.poll_complete();
+}
+
+fn planetside_listen (ps2_tx: mpsc::Sender<UIEvent>,
+    subscribe_rx: futures::sync::mpsc::Receiver<Server>) {
     let cache = Arc::new(Mutex::new(HashMap::new()));
     let mut core = Core::new().unwrap();
     let handle = core.handle();
 
-
     let connect = ClientBuilder::new("wss://push.planetside2.com/streaming?environment=ps2&service-id=s:scrmopsbot")
         .unwrap().async_connect(None, &handle);
 
-    let send = connect.from_err().and_then(move |(socket, _)| {
-        let subscription = Subscribe {
-            characters:Some(vec!(String::from("all"))),
-            eventNames: vec!(String::from("VehicleDestroy")),
-            worlds:vec!(String::from("17")),
-            logicalAndCharactersWithWorlds: true,
-        };
+    let (socket, headers) = core.run(connect).unwrap();
+    let (sink, stream) = socket.split();
 
-        let mut j = serde_json::to_value(&subscription);
-        j.as_object_mut().unwrap().insert(String::from("action"),
-            Value::String(String::from("subscribe")));
-        j.as_object_mut().unwrap().insert(String::from("service"),
-            Value::String(String::from("event")));
+    let sink = Rc::new(RefCell::new(sink));
 
-        let message = websocket::Message::text(j.to_string());
-        socket.from_err().send(OwnedMessage::from(message)).from_err().and_then(move |mut socket| {
-        let (sink, stream) = socket.split();
-        stream.for_each({
-            let mut sink = sink;
-            let cache = cache.clone();
-            let ps2_tx = ps2_tx.clone();
-            move |message| {
-                let message = Message::from(message);
-                match message.opcode {
-                    websocket::message::Type::Text => {
-                        let jv: serde_json::Value = serde_json::from_slice(
-                            &*message.payload).unwrap();
-                        match parse_message(jv.clone()) {
-                            Some(planetside::Message::Service(m)) => {
-                                println!("VehicleDestroy received");
-                                let ps2_tx2 = ps2_tx.clone();
-                                handle_service_message(m, ps2_tx2, &cache, &handle)
-                            }
-                            Some(_) => {Box::new(future::result(Ok(())))}
-                            None => {
-                                println!("Could not deserialize message: {}", jv);
-                                Box::new(future::result(Ok(())))
-                            }
+    let handle_websocket = stream.from_err().for_each({
+        let sink = sink.clone();
+        let cache = cache.clone();
+        let ps2_tx = ps2_tx.clone();
+        move |message| {
+            let message = Message::from(message);
+            match message.opcode {
+                websocket::message::Type::Text => {
+                    let jv: serde_json::Value = serde_json::from_slice(
+                        &*message.payload).unwrap();
+                    match parse_message(jv.clone()) {
+                        Some(planetside::Message::Service(m)) => {
+                            println!("VehicleDestroy received");
+                            let ps2_tx2 = ps2_tx.clone();
+                            handle_service_message(m, ps2_tx2, &cache, &handle)
+                        }
+                        Some(_) => {Box::new(future::result(Ok(())))}
+                        None => {
+                            println!("Could not deserialize message: {}", jv);
+                            Box::new(future::result(Ok(())))
                         }
                     }
-                    websocket::message::Type::Ping => {
-                        sink.start_send(OwnedMessage::from(message));
-                        sink.poll_complete();
-                        future::result(Ok(())).boxed()
-                    }
-                    websocket::message::Type::Close => {
-                        future::result(Ok(())).boxed()
-                    }
-                    _ => {
-                        future::result(Ok(())).boxed()
-                    }
                 }
-            }})})
+                websocket::message::Type::Ping => {
+                    let mut sink_mut = sink.borrow_mut();
+
+                    sink_mut.start_send(OwnedMessage::from(message));
+                    sink_mut.poll_complete();
+                    future::result(Ok(())).boxed()
+                }
+                websocket::message::Type::Close => {
+                    future::result(Ok(())).boxed()
+                }
+                _ => {
+                    future::result(Ok(())).boxed()
+                }
+            }
         }
-    );
-    core.run(send);
+    });
+
+    let handle_subscribe = subscribe_rx.from_err().for_each({
+        let sink = sink;
+        move |message| {
+            let clear = websocket::Message::text("{\"action\":\"clearSubscribe\",\"all\":\"true\",\"service\":\"event\"}");
+
+            let mut sink_mut = sink.borrow_mut();
+
+            sink_mut.start_send(OwnedMessage::from(clear));
+            sink_mut.poll_complete();
+
+            subscribe(sink_mut.deref_mut(), message);
+
+            future::result(Ok(())).boxed()
+        }
+    });
+
+    core.execute(handle_subscribe);
+    core.run(handle_websocket);
 }
 
 struct FeedBuffer {

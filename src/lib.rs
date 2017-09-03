@@ -23,6 +23,15 @@ pub struct Subscribe {
     pub logicalAndCharactersWithWorlds: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct ClearSubscribe {
+#[serde(skip_serializing_if = "Option::is_none")]
+    pub characters: Option<Vec<String>>,
+    pub eventNames: Option<Vec<String>>,
+    pub worlds: Option<Vec<String>>,
+    pub logicalAndCharactersWithWorlds: bool,
+}
+
 #[derive(Clone, Debug,Serialize,Deserialize)]
 pub struct GainExperience {
     pub amount: u32,

@@ -21,6 +21,6 @@ futures = "^0.1.14"
 tokio-core = "^0.1.8"
 
 [dependencies.conrod]
-version = "^0.53.0"
+version = "^0.54.0"
 default-features = false
 features = ["glium", "winit"]
